@@ -1,0 +1,456 @@
+---
+import '../styles/global.css';
+import SkyVisual from '../components/SkyVisual.astro';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Milky Way Visibility Tracker</title>
+  </head>
+  <body>
+    <main>
+      <div class="header">
+        <div>
+          <h1>Milky Way Tracker</h1>
+          <div class="sub"><span id="loc-name">Locating…</span> · <span id="date"></span></div>
+        </div>
+        <div class="loc-controls">
+          <input id="in-lat" type="number" step="0.001" placeholder="lat" aria-label="latitude" />
+          <input id="in-lon" type="number" step="0.001" placeholder="lon" aria-label="longitude" />
+          <button id="btn-set">Update</button>
+          <button id="btn-geo">Use my location</button>
+        </div>
+      </div>
+
+      <section class="card tonight" id="tonight">
+        <div class="score-badge">
+          <div class="score-num" id="t-score">–</div>
+          <div class="score-label">tonight</div>
+        </div>
+        <div>
+          <div class="verdict" id="t-verdict">Calculating…</div>
+          <div class="facts" id="t-facts"></div>
+          <p class="note" id="site-disclaimer" style="margin-bottom:0"></p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Next 7 nights</h2>
+        <div class="strip" id="forecast"></div>
+        <p class="note" id="weather-note"></p>
+      </section>
+
+      <SkyVisual />
+
+      <section class="card">
+        <h2>Photography guidance</h2>
+        <div class="facts" id="photo"></div>
+        <p class="note">Near the horizon the core is dimmed by atmospheric extinction and haze,
+          so it looks faded below ~10&deg;. Aim for nights where the core climbs well above that.</p>
+
+        <h3 class="tips-h">Camera settings (starting point)</h3>
+        <div class="facts tips">
+          <div class="fact"><div class="k">Shutter</div><div class="v">500 ÷ focal length = max sec before star trails.
+            20mm → ~25s (full-frame); ÷1.5 on APS-C → ~17s. Use the NPF rule for pixel-sharp stars.</div></div>
+          <div class="fact"><div class="k">Aperture</div><div class="v">Wide open — f/2.8 or faster (f/1.8–2.8).
+            Stop down ⅓ stop only if corners are soft.</div></div>
+          <div class="fact"><div class="k">ISO</div><div class="v">Start ISO 3200; range 1600–6400.
+            Darker sky → push higher; bright moon → lower.</div></div>
+          <div class="fact"><div class="k">Focus &amp; RAW</div><div class="v">Manual focus on a bright star
+            (live-view zoom) or infinity. Shoot RAW. White balance ~3900K.</div></div>
+        </div>
+
+        <h3 class="tips-h">Make the galaxy POP in Lightroom — 3 sliders to boost</h3>
+        <ol class="note tips-list">
+          <li><strong>Dehaze (+)</strong> — the single biggest win: cuts airglow/atmospheric haze and
+            instantly lifts core contrast. Nudge to taste (~+20–40).</li>
+          <li><strong>Contrast (+)</strong> — separates the bright dust lanes from the sky. Pair with
+            Whites up / Blacks down for punch.</li>
+          <li><strong>Clarity / Texture (+)</strong> — accentuates the mid-tone structure of the core
+            so the dust detail stands out.</li>
+        </ol>
+        <p class="note">Bonus: cool the <em>Temp</em> slider to neutralize light-pollution orange, drop
+          <em>Blacks</em> slightly to deepen the sky, and add <em>Noise Reduction</em> (Luminance ~20–40)
+          to clean up the high ISO. Don't overcook Dehaze — it adds noise and can crush faint stars.</p>
+      </section>
+
+      <section class="card">
+        <h2>Yearly outlook — peak core altitude by month</h2>
+        <div class="months" id="months"></div>
+        <p class="note">Peak altitude of the galactic core during astronomical night (15th of each month).
+          Colours are graded relative to <em>this location's</em> annual best, so your strongest
+          months read green even where the absolute altitude is modest. Numbers are the true
+          degrees — travel toward ~29°S for a near-overhead core. The small time shows when the
+          core peaks: 🌆 after dusk · 🌙 mid-night · 🌅 pre-dawn — it drifts earlier through the
+          year (pre-dawn in spring → after dusk in autumn).</p>
+      </section>
+    </main>
+
+    <script>
+      import {
+        scoreNight, moonInfo, astronomicalNight, coreHorizon,
+        compassLabel, monthlyOutlook, annualMaxCoreAltitude, coreCeiling,
+        USEFUL_ALT, IDEAL_ALT_MIN, IDEAL_ALT_GOOD,
+        type Loc, type NightScore, type MoonInfo,
+      } from '../lib/astro';
+      import { fetchClouds, cloudLookup, skyFromCloud, skyLabel, type CloudForecast, type Sky } from '../lib/weather';
+
+      const DEFAULT_LOC: Loc = { lat: 40.71, lon: -74.0 };
+      const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+      interface Night {
+        day: Date;
+        ns: NightScore;
+        moon: MoonInfo;
+        sky: Sky | null;
+      }
+
+      const state: {
+        loc: Loc;
+        locName: string;
+        forecast: CloudForecast | null;
+        nights: Night[];
+        selected: number;
+        annualMax: number; // best core altitude reached during darkness all year, at this loc
+      } = { loc: DEFAULT_LOC, locName: 'Default (New York)', forecast: null, nights: [], selected: 0, annualMax: 0 };
+
+      // --- helpers ---
+      const $ = (id: string) => document.getElementById(id)!;
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const fmtTime = (d: Date | null) => (d ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : '—');
+      const fmtRange = (a: Date | null, b: Date | null) => (a && b ? `${fmtTime(a)} – ${fmtTime(b)}` : '—');
+      const scoreColor = (s: number) => (s >= 70 ? 'var(--good)' : s >= 40 ? 'var(--mid)' : 'var(--bad)');
+
+      function dayAt(offset: number): Date {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        d.setDate(d.getDate() + offset);
+        return d;
+      }
+
+      function skyForNight(ns: NightScore): Sky | null {
+        if (ns.cloudAtPeak === undefined) return null;
+        return skyFromCloud(ns.cloudAtPeak);
+      }
+
+      function tileGlyphs(n: Night): string {
+        const { ns } = n;
+        if (!ns.peakTime) return '—';
+        if (ns.score >= 75) return '✦✦';
+        switch (ns.limiting) {
+          case 'cloud': return ns.score >= 40 ? '⛅' : '☁';
+          case 'moon': return '☾';
+          case 'low altitude': return '↓';
+          default: return '✦';
+        }
+      }
+
+      function tileWhy(n: Night): string {
+        const { ns, moon } = n;
+        if (!ns.peakTime) {
+          return ns.limiting === 'no darkness' ? 'No dark sky' : 'Core too low';
+        }
+        switch (ns.limiting) {
+          case 'cloud': return ns.cloudAtPeak !== undefined ? `Cloud ${Math.round(ns.cloudAtPeak)}%` : 'Cloudy';
+          case 'moon': return `Moon ${Math.round(moon.illumination * 100)}%`;
+          case 'low altitude': return `Core ${Math.round(ns.peakAltitude)}°`;
+          default: return `Clear · ${Math.round(ns.peakAltitude)}°`;
+        }
+      }
+
+      // --- compute ---
+      function computeNights() {
+        const lookup = cloudLookup(state.forecast);
+        state.annualMax = annualMaxCoreAltitude(state.loc, new Date().getFullYear());
+        state.nights = [];
+        for (let i = 0; i < 7; i++) {
+          const day = dayAt(i);
+          const ns = scoreNight(state.loc, day, lookup, state.annualMax);
+          const refForMoon = ns.peakTime ?? new Date(day.getTime() + 24 * 3600e3); // ~midnight next
+          const moon = moonInfo(state.loc, refForMoon);
+          state.nights.push({ day, ns, moon, sky: skyForNight(ns) });
+        }
+      }
+
+      // --- render ---
+      function render() {
+        renderHeader();
+        renderForecast();
+        renderSelected();
+        renderMonthly();
+      }
+
+      function renderHeader() {
+        $('loc-name').textContent = `${state.locName} (${state.loc.lat.toFixed(2)}, ${state.loc.lon.toFixed(2)})`;
+        $('date').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+        (($('in-lat') as HTMLInputElement).value = state.loc.lat.toFixed(3));
+        (($('in-lon') as HTMLInputElement).value = state.loc.lon.toFixed(3));
+      }
+
+      function renderForecast() {
+        const el = $('forecast');
+        el.innerHTML = '';
+        state.nights.forEach((n, i) => {
+          const label = i === 0 ? 'Tonight' : i === 1 ? 'Tomorrow'
+            : n.day.toLocaleDateString(undefined, { weekday: 'short' });
+          const t = document.createElement('div');
+          t.className = 'tile' + (i === state.selected ? ' active' : '');
+          t.innerHTML = `
+            <div class="day">${label}</div>
+            <div class="ts" style="color:${scoreColor(n.ns.score)}">${n.ns.score}</div>
+            <div class="glyphs">${tileGlyphs(n)}</div>
+            <div class="why">${tileWhy(n)}</div>
+            <div class="bar"><span style="width:${n.ns.score}%;background:${scoreColor(n.ns.score)}"></span></div>`;
+          t.addEventListener('click', () => { state.selected = i; render(); });
+          el.appendChild(t);
+        });
+        $('weather-note').textContent = state.forecast
+          ? 'Weather: Open-Meteo cloud-cover forecast.'
+          : 'Weather unavailable — scores reflect darkness, moon and core altitude only.';
+      }
+
+      function renderSelected() {
+        const n = state.nights[state.selected];
+        const { ns, moon } = n;
+        const isTonight = state.selected === 0;
+        $('t-score').textContent = String(ns.score);
+        ($('t-score') as HTMLElement).style.color = scoreColor(ns.score);
+        document.querySelector('.score-label')!.textContent = isTonight ? 'tonight'
+          : n.day.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' });
+
+        let verdict: string;
+        if (!ns.peakTime) verdict = ns.limiting === 'no darkness' ? 'No astronomical darkness tonight' : 'Core stays too low tonight';
+        else if (ns.score >= 75) verdict = `Excellent — core window ${fmtRange(ns.windowStart, ns.windowEnd)}`;
+        else if (ns.score >= 50) verdict = `Good — best around ${fmtTime(ns.peakTime)}`;
+        else if (ns.score >= 25) verdict = `Marginal — limited by ${ns.limiting}`;
+        else verdict = `Poor — limited by ${ns.limiting}`;
+        $('t-verdict').textContent = verdict;
+
+        const sky = n.sky ? skyLabel(n.sky) : 'n/a';
+        const facts: [string, string][] = [
+          ['Dark window', fmtRange(astronomicalNight(state.loc, n.day).dusk, astronomicalNight(state.loc, n.day).dawn)],
+          ['Core window', fmtRange(ns.windowStart, ns.windowEnd)],
+          ['Peak altitude', ns.peakTime ? `${Math.round(ns.peakAltitude)}° at ${fmtTime(ns.peakTime)}` : '—'],
+          ['Moon', `${moon.phaseName} · ${Math.round(moon.illumination * 100)}%`],
+          ['Moonrise / set', `${fmtTime(moon.rise)} / ${fmtTime(moon.set)}`],
+          ['Weather', ns.cloudAtPeak !== undefined ? `${sky} (${Math.round(ns.cloudAtPeak)}% cloud)` : sky],
+          ['Site potential', `core peaks ~${Math.round(coreCeiling(state.loc))}° here (scores graded to this max)`],
+        ];
+        $('t-facts').innerHTML = facts
+          .map(([k, v]) => `<div class="fact"><div class="k">${k}</div><div class="v">${v}</div></div>`)
+          .join('');
+
+        renderSiteDisclaimer();
+        renderPhoto(n);
+        drawSky(n);
+      }
+
+      function renderSiteDisclaimer() {
+        const el = $('site-disclaimer');
+        const ceil = Math.round(coreCeiling(state.loc));
+        if (ceil < IDEAL_ALT_MIN) {
+          el.innerHTML = `⚠️ Your annual max core altitude is ~${ceil}°, <strong>below the ideal
+            ${IDEAL_ALT_MIN}–${IDEAL_ALT_GOOD}°+ range</strong>. So while your region tops out at
+            ~${ceil}°, the core stays in thicker, hazier air near the horizon and won't look as
+            clear or contrasty as regions closer to the equator or in the southern hemisphere.`;
+          el.style.display = '';
+        } else if (ceil < IDEAL_ALT_GOOD) {
+          el.innerHTML = `Your annual max core altitude is ~${ceil}°, in the lower part of the ideal
+            ${IDEAL_ALT_MIN}–${IDEAL_ALT_GOOD}°+ range — decent, with the best months getting the core
+            reasonably clear of horizon haze.`;
+          el.style.display = '';
+        } else {
+          el.innerHTML = `Excellent site — annual max core altitude ~${ceil}°, at or above the ideal
+            ${IDEAL_ALT_GOOD}°+ range. The core rises high into clean air for a crisp, high-contrast band.`;
+          el.style.display = '';
+        }
+      }
+
+      function renderPhoto(n: Night) {
+        const { ns } = n;
+        let facts: [string, string][];
+        if (!ns.peakTime) {
+          facts = [['Guidance', 'Core not usefully visible this night — check another date.']];
+        } else {
+          const dir = `${compassLabel(ns.peakAzimuth)} (~${Math.round(ns.peakAzimuth)}°)`;
+          const aim = ns.peakAltitude < 20
+            ? `Low — frame ${Math.round(ns.peakAltitude)}° up; expect horizon haze`
+            : `Tilt up ~${Math.round(ns.peakAltitude)}° at peak`;
+          facts = [
+            ['Face toward', dir],
+            ['Aim altitude', aim],
+            ['Best time', fmtTime(ns.peakTime)],
+          ];
+        }
+        $('photo').innerHTML = facts
+          .map(([k, v]) => `<div class="fact"><div class="k">${k}</div><div class="v">${v}</div></div>`)
+          .join('');
+      }
+
+      function drawSky(n: Night) {
+        const canvas = $('sky-canvas') as HTMLCanvasElement;
+        const ctx = canvas.getContext('2d')!;
+        const W = canvas.width, H = canvas.height;
+        ctx.clearRect(0, 0, W, H);
+        const padL = 40, padR = 20, padT = 20, padB = 30;
+        const plotW = W - padL - padR, plotH = H - padT - padB;
+        const yFor = (alt: number) => padT + plotH * (1 - Math.max(0, Math.min(90, alt)) / 90);
+
+        // haze band (alt < USEFUL_ALT)
+        ctx.fillStyle = 'rgba(60,70,110,0.35)';
+        ctx.fillRect(padL, yFor(USEFUL_ALT), plotW, H - padB - yFor(USEFUL_ALT));
+        // horizon line
+        ctx.strokeStyle = '#334'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(padL, yFor(0)); ctx.lineTo(W - padR, yFor(0)); ctx.stroke();
+        // altitude gridlines
+        ctx.fillStyle = '#556'; ctx.font = '11px sans-serif';
+        [0, 30, 60, 90].forEach((a) => {
+          ctx.fillText(`${a}°`, 6, yFor(a) + 4);
+          ctx.strokeStyle = 'rgba(80,90,130,0.2)';
+          ctx.beginPath(); ctx.moveTo(padL, yFor(a)); ctx.lineTo(W - padR, yFor(a)); ctx.stroke();
+        });
+
+        const night = astronomicalNight(state.loc, n.day);
+        if (!night.hasNight || !night.dusk || !night.dawn) {
+          ctx.fillStyle = '#9aa0c8'; ctx.font = '15px sans-serif';
+          ctx.fillText('No astronomical darkness on this night.', padL + 10, padT + plotH / 2);
+          return;
+        }
+
+        const t0 = night.dusk.getTime(), t1 = night.dawn.getTime();
+        const xFor = (t: number) => padL + plotW * ((t - t0) / (t1 - t0));
+
+        // core path
+        let started = false;
+        ctx.lineWidth = 3;
+        let prev: { x: number; y: number } | null = null;
+        for (let t = t0; t <= t1; t += 10 * 60e3) {
+          const core = coreHorizon(state.loc, new Date(t));
+          const x = xFor(t), y = yFor(core.altitude);
+          if (core.altitude < 0) { prev = null; continue; }
+          const q = Math.max(0.15, Math.min(1, core.altitude / 60));
+          if (prev) {
+            ctx.strokeStyle = `rgba(255,107,87,${q})`;
+            ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(x, y); ctx.stroke();
+          }
+          prev = { x, y };
+          started = true;
+        }
+        if (!started) {
+          ctx.fillStyle = '#9aa0c8'; ctx.font = '15px sans-serif';
+          ctx.fillText('Core stays below the horizon tonight.', padL + 10, padT + plotH / 2);
+        }
+
+        // time axis labels (dusk / dawn)
+        ctx.fillStyle = '#9aa0c8'; ctx.font = '11px sans-serif';
+        ctx.fillText(`dusk ${fmtTime(night.dusk)}`, padL, H - 10);
+        ctx.textAlign = 'right';
+        ctx.fillText(`dawn ${fmtTime(night.dawn)}`, W - padR, H - 10);
+        ctx.textAlign = 'left';
+
+        // peak marker
+        if (n.ns.peakTime) {
+          const px = xFor(n.ns.peakTime.getTime()), py = yFor(n.ns.peakAltitude);
+          ctx.fillStyle = '#cfe0ff';
+          ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
+          ctx.fillText(`${compassLabel(n.ns.peakAzimuth)} ${Math.round(n.ns.peakAltitude)}°`, px + 8, py - 6);
+        }
+      }
+
+      function renderMonthly() {
+        const outlook = monthlyOutlook(state.loc, new Date().getFullYear());
+        const el = $('months');
+        const max = state.annualMax || 1;
+        el.innerHTML = outlook.map((m) => {
+          const alt = Math.round(m.peakAltitude);
+          // Colour relative to this location's own annual best, so the region's
+          // strong months read green even if the absolute altitude is modest.
+          const ratio = m.peakAltitude / max;
+          const color = ratio >= 0.8 ? 'var(--good)' : ratio >= 0.4 ? 'var(--mid)' : alt > 0 ? 'var(--bad)' : '#556';
+          const phaseSym: Record<string, string> = { dusk: '🌆', mid: '🌙', dawn: '🌅' };
+          const phaseTxt: Record<string, string> = { dusk: 'after dusk', mid: 'mid-night', dawn: 'pre-dawn' };
+          const when = m.bestTimePhase
+            ? `<div class="mw" title="Core peaks ${phaseTxt[m.bestTimePhase]}">${phaseSym[m.bestTimePhase]} ${fmtTime(m.bestTime)}</div>`
+            : `<div class="mw">—</div>`;
+          return `<div class="mo" style="border-color:${color}">
+            <div class="mn">${MONTHS[m.month]}</div>
+            <div class="ma" style="color:${color}">${alt > 0 ? alt + '°' : '—'}</div>
+            ${when}
+          </div>`;
+        }).join('');
+      }
+
+      // --- location + boot ---
+      function saveLoc() {
+        localStorage.setItem('mw-loc', JSON.stringify({ ...state.loc, name: state.locName }));
+      }
+
+      async function refresh() {
+        // Render astronomy immediately — never block the UI on the network.
+        state.forecast = null;
+        computeNights();
+        render();
+        // Then layer in weather and re-render if it succeeds.
+        try {
+          state.forecast = await fetchClouds(state.loc.lat, state.loc.lon);
+          computeNights();
+          render();
+        } catch (e) {
+          state.forecast = null;
+          $('weather-note').textContent =
+            'Weather unavailable — scores reflect darkness, moon and core altitude only.';
+        }
+      }
+
+      function applyManualLoc() {
+        const lat = parseFloat(($('in-lat') as HTMLInputElement).value);
+        const lon = parseFloat(($('in-lon') as HTMLInputElement).value);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+          state.loc = { lat, lon };
+          state.locName = 'Custom';
+          state.selected = 0;
+          saveLoc();
+          refresh();
+        }
+      }
+
+      function useGeolocation() {
+        if (!navigator.geolocation) return;
+        $('loc-name').textContent = 'Locating…';
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            state.loc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+            state.locName = 'My location';
+            state.selected = 0;
+            saveLoc();
+            refresh();
+          },
+          () => { /* keep current on denial */ refresh(); },
+          { timeout: 8000 },
+        );
+      }
+
+      $('btn-set').addEventListener('click', applyManualLoc);
+      $('btn-geo').addEventListener('click', useGeolocation);
+
+      // boot: saved loc -> geolocation -> default
+      const saved = localStorage.getItem('mw-loc');
+      if (saved) {
+        try {
+          const p = JSON.parse(saved);
+          state.loc = { lat: p.lat, lon: p.lon };
+          state.locName = p.name ?? 'Saved';
+        } catch {}
+        refresh();
+      } else if (navigator.geolocation) {
+        useGeolocation();
+        refresh(); // render default immediately while geo resolves
+      } else {
+        refresh();
+      }
+    </script>
+  </body>
+</html>
