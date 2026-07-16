@@ -237,6 +237,64 @@ export function scoreNight(loc: Loc, day: Date, cloud?: CloudLookup, annualMaxAl
   };
 }
 
+// --- Galactic plane arc (for the sky visual) -----------------------------
+
+export interface SkyPoint {
+  az: number; // 0..360 compass azimuth
+  alt: number; // degrees above horizon (may be < 0)
+  w: number; // 0..1 relative brightness (brightest near the core)
+}
+
+export interface GalacticArc {
+  points: SkyPoint[];
+  core: { az: number; alt: number };
+}
+
+const D2R = Math.PI / 180;
+const R2D = 180 / Math.PI;
+
+function unitVec(raDeg: number, decDeg: number): [number, number, number] {
+  const r = raDeg * D2R, d = decDeg * D2R;
+  return [Math.cos(d) * Math.cos(r), Math.cos(d) * Math.sin(r), Math.sin(d)];
+}
+function cross(a: number[], b: number[]): [number, number, number] {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+function normalize(a: number[]): [number, number, number] {
+  const m = Math.hypot(a[0], a[1], a[2]);
+  return [a[0] / m, a[1] / m, a[2] / m];
+}
+
+// J2000 equatorial coords of the galactic center and north galactic pole.
+const NGP = unitVec(192.8595, 27.1284);
+const GC = unitVec(266.4051, -28.9362); // galactic longitude 0 (the bright core)
+
+// Sample the galactic equator (the Milky Way band) as a great circle and project
+// it into horizontal (az/alt) coords for the given time & location.
+export function galacticArc(loc: Loc, date: Date): GalacticArc {
+  const observer = observerOf(loc);
+  const c = GC;
+  const d = normalize(cross(NGP, c)); // second in-plane axis
+  const points: SkyPoint[] = [];
+  for (let deg = 0; deg < 360; deg += 2) {
+    const th = deg * D2R;
+    const p: [number, number, number] = [
+      c[0] * Math.cos(th) + d[0] * Math.sin(th),
+      c[1] * Math.cos(th) + d[1] * Math.sin(th),
+      c[2] * Math.cos(th) + d[2] * Math.sin(th),
+    ];
+    const raDeg = (Math.atan2(p[1], p[0]) * R2D + 360) % 360;
+    const decDeg = Math.asin(p[2]) * R2D;
+    const hor = A.Horizon(date, observer, raDeg / 15, decDeg, 'normal');
+    // brightness peaks toward the galactic center (deg near 0 / 360)
+    const dcore = Math.min(deg, 360 - deg); // 0..180
+    const w = 0.2 + 0.8 * Math.exp(-(dcore * dcore) / (2 * 45 * 45));
+    points.push({ az: hor.azimuth, alt: hor.altitude, w });
+  }
+  const coreHor = A.Horizon(date, observer, 266.4051 / 15, -28.9362, 'normal');
+  return { points, core: { az: coreHor.azimuth, alt: coreHor.altitude } };
+}
+
 // --- Photography guidance ------------------------------------------------
 
 export function compassLabel(azimuth: number): string {

@@ -91,8 +91,8 @@ import SkyVisual from '../components/SkyVisual.astro';
 
     <script>
       import {
-        scoreNight, moonInfo, astronomicalNight, coreHorizon,
-        compassLabel, monthlyOutlook, annualMaxCoreAltitude, coreCeiling,
+        scoreNight, moonInfo, astronomicalNight,
+        compassLabel, monthlyOutlook, annualMaxCoreAltitude, coreCeiling, galacticArc,
         USEFUL_ALT, IDEAL_ALT_MIN, IDEAL_ALT_GOOD,
         type Loc, type NightScore, type MoonInfo,
       } from '../lib/astro';
@@ -290,73 +290,117 @@ import SkyVisual from '../components/SkyVisual.astro';
           .join('');
       }
 
+      // Renders the Milky Way band as it appears across the sky dome at the
+      // night's best time — a horizon (bottom) to zenith (top) view. When the
+      // core is high the band stands vertical; when low it arches near the horizon.
       function drawSky(n: Night) {
         const canvas = $('sky-canvas') as HTMLCanvasElement;
         const ctx = canvas.getContext('2d')!;
         const W = canvas.width, H = canvas.height;
-        ctx.clearRect(0, 0, W, H);
-        const padL = 40, padR = 20, padT = 20, padB = 30;
+        const padL = 34, padR = 16, padT = 16, padB = 34;
         const plotW = W - padL - padR, plotH = H - padT - padB;
-        const yFor = (alt: number) => padT + plotH * (1 - Math.max(0, Math.min(90, alt)) / 90);
+        const cx = padL + plotW / 2;
+        const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+        // wrap az to a south-centred view: S in the middle, E left, W right.
+        const wrap180 = (a: number) => { a = ((a + 180) % 360 + 360) % 360 - 180; return a; };
+        const xForAz = (az: number) => cx + (wrap180(az - 180) / 180) * (plotW / 2);
+        const yFor = (alt: number) => padT + plotH * (1 - clamp(alt, 0, 90) / 90);
 
-        // haze band (alt < USEFUL_ALT)
-        ctx.fillStyle = 'rgba(60,70,110,0.35)';
-        ctx.fillRect(padL, yFor(USEFUL_ALT), plotW, H - padB - yFor(USEFUL_ALT));
-        // horizon line
-        ctx.strokeStyle = '#334'; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(padL, yFor(0)); ctx.lineTo(W - padR, yFor(0)); ctx.stroke();
+        // sky background gradient (deep at top -> lighter/hazier at horizon)
+        const g = ctx.createLinearGradient(0, padT, 0, H - padB);
+        g.addColorStop(0, '#05060f');
+        g.addColorStop(0.7, '#0a0e22');
+        g.addColorStop(1, '#161d3a');
+        ctx.fillStyle = g;
+        ctx.fillRect(padL, padT, plotW, plotH);
+
+        // scattered background stars (deterministic)
+        let seed = 7;
+        const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+        ctx.fillStyle = 'rgba(207,224,255,0.7)';
+        for (let i = 0; i < 160; i++) {
+          const sx = padL + rnd() * plotW, sy = padT + rnd() * plotH;
+          const r = rnd() * 1.1 + 0.2;
+          ctx.globalAlpha = 0.3 + rnd() * 0.6;
+          ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
         // altitude gridlines
-        ctx.fillStyle = '#556'; ctx.font = '11px sans-serif';
+        ctx.font = '11px sans-serif';
         [0, 30, 60, 90].forEach((a) => {
-          ctx.fillText(`${a}°`, 6, yFor(a) + 4);
-          ctx.strokeStyle = 'rgba(80,90,130,0.2)';
+          ctx.strokeStyle = 'rgba(120,130,180,0.15)';
           ctx.beginPath(); ctx.moveTo(padL, yFor(a)); ctx.lineTo(W - padR, yFor(a)); ctx.stroke();
+          ctx.fillStyle = '#667'; ctx.fillText(`${a}°`, 4, yFor(a) + 4);
         });
 
+        // horizon haze band (< USEFUL_ALT)
+        const hz = ctx.createLinearGradient(0, yFor(USEFUL_ALT), 0, yFor(0));
+        hz.addColorStop(0, 'rgba(60,70,110,0)');
+        hz.addColorStop(1, 'rgba(90,100,140,0.5)');
+        ctx.fillStyle = hz;
+        ctx.fillRect(padL, yFor(USEFUL_ALT), plotW, yFor(0) - yFor(USEFUL_ALT));
+        ctx.strokeStyle = '#334'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(padL, yFor(0)); ctx.lineTo(W - padR, yFor(0)); ctx.stroke();
+
         const night = astronomicalNight(state.loc, n.day);
-        if (!night.hasNight || !night.dusk || !night.dawn) {
-          ctx.fillStyle = '#9aa0c8'; ctx.font = '15px sans-serif';
-          ctx.fillText('No astronomical darkness on this night.', padL + 10, padT + plotH / 2);
+        if (!night.hasNight || !night.dusk || !night.dawn || !n.ns.peakTime) {
+          ctx.fillStyle = '#9aa0c8'; ctx.font = '15px sans-serif'; ctx.textAlign = 'center';
+          ctx.fillText(!night.hasNight ? 'No astronomical darkness on this night.'
+            : 'Core does not clear the horizon this night.', cx, padT + plotH / 2);
+          ctx.textAlign = 'left';
+          drawCompass();
           return;
         }
 
-        const t0 = night.dusk.getTime(), t1 = night.dawn.getTime();
-        const xFor = (t: number) => padL + plotW * ((t - t0) / (t1 - t0));
-
-        // core path
-        let started = false;
-        ctx.lineWidth = 3;
-        let prev: { x: number; y: number } | null = null;
-        for (let t = t0; t <= t1; t += 10 * 60e3) {
-          const core = coreHorizon(state.loc, new Date(t));
-          const x = xFor(t), y = yFor(core.altitude);
-          if (core.altitude < 0) { prev = null; continue; }
-          const q = Math.max(0.15, Math.min(1, core.altitude / 60));
-          if (prev) {
-            ctx.strokeStyle = `rgba(255,107,87,${q})`;
-            ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(x, y); ctx.stroke();
-          }
-          prev = { x, y };
-          started = true;
-        }
-        if (!started) {
-          ctx.fillStyle = '#9aa0c8'; ctx.font = '15px sans-serif';
-          ctx.fillText('Core stays below the horizon tonight.', padL + 10, padT + plotH / 2);
+        // --- the Milky Way band at the night's best time ---
+        const when = n.ns.peakTime;
+        const arc = galacticArc(state.loc, when);
+        // draw as connected glowing segments; brightness by proximity to core + haze fade
+        for (let i = 0; i < arc.points.length - 1; i++) {
+          const a = arc.points[i], b = arc.points[i + 1];
+          if (a.alt < 0 || b.alt < 0) continue;
+          const ax = xForAz(a.az), bx = xForAz(b.az);
+          if (Math.abs(ax - bx) > plotW / 2) continue; // skip the north seam wrap
+          const w = (a.w + b.w) / 2;
+          const meanAlt = (a.alt + b.alt) / 2;
+          const hazeFade = clamp(meanAlt / 22, 0.28, 1); // dimmer near horizon
+          const alpha = (0.12 + 0.55 * w) * hazeFade;
+          // core = warm violet-white, arms = cool blue (matches the eye/camera)
+          const r = Math.round(150 + 90 * w), gg = Math.round(158 + 70 * w), bl = Math.round(220 + 30 * w);
+          ctx.strokeStyle = `rgba(${r},${gg},${bl},${alpha})`;
+          ctx.lineWidth = 3 + 10 * w;
+          ctx.lineCap = 'round';
+          ctx.beginPath(); ctx.moveTo(ax, yFor(a.alt)); ctx.lineTo(bx, yFor(b.alt)); ctx.stroke();
         }
 
-        // time axis labels (dusk / dawn)
+        // core bulge glow
+        if (arc.core.alt > 0) {
+          const px = xForAz(arc.core.az), py = yFor(arc.core.alt);
+          const rad = 46 * clamp(arc.core.alt / 20, 0.5, 1.4);
+          const cg = ctx.createRadialGradient(px, py, 0, px, py, rad);
+          cg.addColorStop(0, 'rgba(232,220,255,0.55)');
+          cg.addColorStop(0.5, 'rgba(180,160,230,0.22)');
+          cg.addColorStop(1, 'rgba(180,160,230,0)');
+          ctx.fillStyle = cg;
+          ctx.beginPath(); ctx.arc(px, py, rad, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = '#efe8ff'; ctx.font = '12px sans-serif';
+          ctx.fillText(`core · ${compassLabel(arc.core.az)} ${Math.round(arc.core.alt)}°`, px + 10, py - 8);
+        }
+
+        drawCompass();
+        // best-time caption
         ctx.fillStyle = '#9aa0c8'; ctx.font = '11px sans-serif';
-        ctx.fillText(`dusk ${fmtTime(night.dusk)}`, padL, H - 10);
-        ctx.textAlign = 'right';
-        ctx.fillText(`dawn ${fmtTime(night.dawn)}`, W - padR, H - 10);
-        ctx.textAlign = 'left';
+        ctx.fillText(`best time ${fmtTime(when)}`, padL, padT + 12);
 
-        // peak marker
-        if (n.ns.peakTime) {
-          const px = xFor(n.ns.peakTime.getTime()), py = yFor(n.ns.peakAltitude);
-          ctx.fillStyle = '#cfe0ff';
-          ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
-          ctx.fillText(`${compassLabel(n.ns.peakAzimuth)} ${Math.round(n.ns.peakAltitude)}°`, px + 8, py - 6);
+        function drawCompass() {
+          ctx.fillStyle = '#8892bd'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+          ([[90, 'E'], [135, 'SE'], [180, 'S'], [225, 'SW'], [270, 'W']] as [number, string][])
+            .forEach(([az, lbl]) => {
+              const x = xForAz(az);
+              if (x >= padL && x <= W - padR) ctx.fillText(lbl, x, H - 12);
+            });
+          ctx.textAlign = 'left';
         }
       }
 
