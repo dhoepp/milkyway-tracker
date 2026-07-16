@@ -3,12 +3,13 @@
 // client script (see index.astro) using the core track for the selected night.
 ---
 <section class="card">
-  <h2>Sky tonight — core path</h2>
-  <canvas id="sky-canvas" width="900" height="360" role="img"
-    aria-label="Diagram of the Milky Way core path across the night sky"></canvas>
+  <h2>Sky at best time — Milky Way band</h2>
+  <canvas id="sky-canvas" width="900" height="460" role="img"
+    aria-label="Diagram of the Milky Way band arching across the sky, looking south"></canvas>
   <div class="legend">
-    <span><span class="swatch" style="background:#ff6b57"></span>Core path (brighter = higher/clearer)</span>
+    <span><span class="swatch" style="background:#e6dcff"></span>Galactic core (brightest)</span>
+    <span><span class="swatch" style="background:#96a0dc"></span>Milky Way band</span>
     <span><span class="swatch" style="background:#334;"></span>Horizon haze zone (&lt;10&deg;)</span>
-    <span><span class="swatch" style="background:#cfe0ff"></span>Peak position</span>
+    <span>View looks toward the horizon; up = higher in the sky.</span>
   </div>
 </section>
